@@ -46,18 +46,60 @@ export interface S3BlobProviderOptions {
   contentFields: string[];
   /** Field used as unique identifier. Default: 'id'. */
   idField?: string;
+  /**
+   * Public base URL of the bucket (e.g. a CloudFront/CDN origin, or a public
+   * bucket's website endpoint). Blobs then resolve to
+   * `${publicBaseUrl}${prefix}${id}/${field}` via `getUrl()`.
+   *
+   * This is the simple case: public media the browser can fetch straight from the
+   * bucket, with range requests intact. For private buckets use `urlFor` with a
+   * presigner instead.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Full control over URL resolution — may be async, so it can pre-sign.
+   * Pass `createPresignedRefGenerator(...)`-style logic here for private buckets.
+   * Takes precedence over `publicBaseUrl`.
+   *
+   * When neither is given, `getUrl()` returns `null` and consumers fall back to
+   * downloading bytes through `getContent()`.
+   */
+  urlFor?: (id: string, field: string) => string | Promise<string>;
+  /**
+   * The S3 object key for a content field. Default: `{prefix}{id}/{field}`.
+   *
+   * Override when the bucket holds one object per item rather than a folder per item —
+   * which is the normal case with a single content field, where the item id *is* the
+   * filename (`clips/osoto-gari.mp4`, not `clips/osoto-gari.mp4/clip`).
+   *
+   * This matters for migrations: `@zodal/store-http` keys a lone content field as
+   * `{base}/{id}`, so a bucket that mirrors an existing HTTP layout wants
+   * `contentKey: (id) => `${prefix}${id}`` here. Getting it wrong doesn't break app code
+   * — everything still goes through `getUrl()` — but it silently changes every URL's
+   * shape, which is exactly the kind of thing a storage swap is supposed not to do.
+   */
+  contentKey?: (id: string, field: string) => string;
 }
 
 export function createS3BlobProvider<T extends Record<string, any>>(
   options: S3BlobProviderOptions,
 ): DataProvider<T> {
-  const { client, bucket, contentFields } = options;
+  const { client, bucket, contentFields, publicBaseUrl, urlFor } = options;
   const prefix = options.prefix ?? '';
   const idField = options.idField ?? 'id';
   const contentSet = new Set(contentFields);
 
-  function blobKey(id: string, field: string): string {
-    return `${prefix}${id}/${field}`;
+  const blobKey =
+    options.contentKey ?? ((id: string, field: string) => `${prefix}${id}/${field}`);
+
+  // The URL must address the SAME object the key does, or getUrl() and getContent()
+  // would disagree about where the bytes are.
+  async function resolveUrl(id: string, field: string): Promise<string | null> {
+    if (urlFor) return await urlFor(id, field);
+    if (publicBaseUrl) {
+      return `${publicBaseUrl.replace(/\/+$/, '')}/${blobKey(id, field)}`;
+    }
+    return null;
   }
 
   async function putBlob(id: string, field: string, content: unknown): Promise<void> {
@@ -167,6 +209,34 @@ export function createS3BlobProvider<T extends Record<string, any>>(
         serverSearch: false,
         serverPagination: false,
       };
+    },
+
+    async getContent(id: string, field: string): Promise<unknown> {
+      if (!contentSet.has(field)) {
+        throw new Error(`'${field}' is not a content field`);
+      }
+      return getBlob(id, field);
+    },
+
+    async setContent(id: string, field: string, content: unknown) {
+      if (!contentSet.has(field)) {
+        throw new Error(`'${field}' is not a content field`);
+      }
+      await putBlob(id, field, content);
+      const url = await resolveUrl(id, field);
+      return { _tag: 'ContentRef' as const, field, itemId: id, ...(url ? { url } : {}) };
+    },
+
+    /**
+     * The endgame seam: with `publicBaseUrl` (or a presigning `urlFor`), the browser
+     * fetches bytes **straight from S3** — range requests intact, so `<video>` can
+     * stream and seek — and the API server is out of the byte path entirely.
+     */
+    async getUrl(id: string, field: string): Promise<string | null> {
+      if (!contentSet.has(field)) {
+        throw new Error(`'${field}' is not a content field`);
+      }
+      return resolveUrl(id, field);
     },
   };
 }

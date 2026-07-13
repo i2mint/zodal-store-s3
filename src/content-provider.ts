@@ -51,6 +51,17 @@ export interface S3ContentProviderOptions {
   listStrategy?: 'reference' | 'omit';
   /** How content fields appear in getOne. Default: 'reference'. */
   detailStrategy?: 'eager' | 'reference';
+  /**
+   * Custom builder for a content field's ContentRef. May be async.
+   *
+   * The default builds a bare ref (no `url`), so consumers must call `getContent()`
+   * and receive bytes. Pass `createPresignedRefGenerator({ client, bucket, prefix })`
+   * from './presigned.js' to populate `ContentRef.url` with a time-limited presigned
+   * URL instead — letting the browser fetch bytes **directly from S3**, with range
+   * requests intact (which is what `<video>`/`<img>` need, and what `getContent()`
+   * cannot give you).
+   */
+  toContentRef?: (itemId: string, field: string) => ContentRef | Promise<ContentRef>;
 }
 
 export function createS3ContentProvider<T extends Record<string, any>>(
@@ -76,9 +87,9 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     return `${prefix}${id}/${field}`;
   }
 
-  function toContentRef(id: string, field: string): ContentRef {
-    return { _tag: 'ContentRef', field, itemId: id };
-  }
+  const toContentRef =
+    options.toContentRef ??
+    ((id: string, field: string): ContentRef => ({ _tag: 'ContentRef', field, itemId: id }));
 
   // --- S3 operations ---
 
@@ -164,15 +175,21 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     return { meta, content };
   }
 
-  function applyContentStrategy(item: Record<string, any>, strategy: 'reference' | 'omit'): Record<string, any> {
+  // Async because `toContentRef` may be — presigning a URL is a round-trip.
+  async function applyContentStrategy(
+    item: Record<string, any>,
+    strategy: 'reference' | 'omit',
+  ): Promise<Record<string, any>> {
     const result = { ...item };
-    for (const field of contentFields) {
-      if (strategy === 'omit') {
-        delete result[field];
-      } else {
-        result[field] = toContentRef(String(item[idField]), field);
-      }
+    if (strategy === 'omit') {
+      for (const field of contentFields) delete result[field];
+      return result;
     }
+    const id = String(item[idField]);
+    const refs = await Promise.all(contentFields.map((field) => toContentRef(id, field)));
+    contentFields.forEach((field, i) => {
+      result[field] = refs[i];
+    });
     return result;
   }
 
@@ -256,7 +273,9 @@ export function createS3ContentProvider<T extends Record<string, any>>(
         items = items.slice((page - 1) * pageSize, page * pageSize);
       }
 
-      const data = items.map(item => applyContentStrategy(item, listStrategy));
+      const data = await Promise.all(
+        items.map(item => applyContentStrategy(item, listStrategy)),
+      );
       return { data: data as T[], total };
     },
 
@@ -268,13 +287,13 @@ export function createS3ContentProvider<T extends Record<string, any>>(
           try {
             meta[field] = await readContent(id, field);
           } catch {
-            meta[field] = toContentRef(id, field);
+            meta[field] = await toContentRef(id, field);
           }
         }
         return meta as T;
       }
 
-      return applyContentStrategy(meta, 'reference') as T;
+      return (await applyContentStrategy(meta, 'reference')) as T;
     },
 
     async create(data: Partial<T>): Promise<T> {
@@ -345,12 +364,23 @@ export function createS3ContentProvider<T extends Record<string, any>>(
       return readContent(id, field);
     },
 
+    async getUrl(id: string, field: string): Promise<string | null> {
+      if (!contentSet.has(field)) {
+        throw new Error(`'${field}' is not a content field`);
+      }
+      // Only a `toContentRef` that signs (or knows a public URL base) can answer this;
+      // the default bare ref carries no `url`, so we correctly report null and the
+      // caller falls back to getContent().
+      const ref = await toContentRef(id, field);
+      return ref.url ?? null;
+    },
+
     async setContent(id: string, field: string, content: unknown): Promise<ContentRef> {
       if (!contentSet.has(field)) {
         throw new Error(`'${field}' is not a content field`);
       }
       await writeContent(id, field, content);
-      return toContentRef(id, field);
+      return await toContentRef(id, field);
     },
   } as DataProvider<T>;
 }
