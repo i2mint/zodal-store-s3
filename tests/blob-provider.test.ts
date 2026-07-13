@@ -157,3 +157,91 @@ describe('createS3BlobProvider', () => {
     expect(stored).toBe('{"key":"value"}');
   });
 });
+
+// ---------------------------------------------------------------------------
+// URL resolution — the seam that makes "move the bytes to S3" a config change.
+//
+// The browser needs a URL, not bytes: getContent() defeats HTTP range requests, so
+// <video> could neither stream nor seek. getUrl() is what lets the browser fetch
+// straight from the bucket with this server out of the byte path.
+// ---------------------------------------------------------------------------
+
+describe('getUrl', () => {
+  it('returns null with no publicBaseUrl/urlFor — caller must fall back to getContent', async () => {
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', contentFields: ['clip'],
+    });
+    expect(await p.getUrl!('x.mp4', 'clip')).toBeNull();
+  });
+
+  it('builds a public URL that addresses the SAME key the bytes are stored under', async () => {
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', prefix: 'clips/', contentFields: ['clip'],
+      publicBaseUrl: 'https://cdn.example.com',
+    });
+    await p.setContent!('x.mp4', 'clip', new Uint8Array([1, 2, 3]));
+
+    const url = await p.getUrl!('x.mp4', 'clip');
+    // The stored S3 key and the URL path must agree, or getUrl and getContent would
+    // point at different objects.
+    const storedKey = [...client.store.keys()][0];
+    expect(url).toBe(`https://cdn.example.com/${storedKey}`);
+  });
+
+  it('honours an async urlFor (this is how pre-signing works)', async () => {
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', contentFields: ['clip'],
+      publicBaseUrl: 'https://ignored.example.com', // urlFor must win
+      urlFor: async (id, field) => {
+        await Promise.resolve();
+        return `https://signed.example.com/${id}?f=${field}&sig=abc`;
+      },
+    });
+    expect(await p.getUrl!('x.mp4', 'clip')).toBe(
+      'https://signed.example.com/x.mp4?f=clip&sig=abc',
+    );
+  });
+
+  it('rejects a non-content field', async () => {
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', contentFields: ['clip'],
+    });
+    await expect(p.getUrl!('x.mp4', 'title')).rejects.toThrow(/not a content field/);
+  });
+
+  it('contentKey keeps URL SHAPE stable across an http → S3 migration', async () => {
+    // The kodokan case. @zodal/store-http keys a lone content field as `{base}/{id}`,
+    // so clips are at /api/kodokan/clips/osoto-gari.mp4. The S3 default would key them
+    // `{prefix}{id}/{field}` → .../osoto-gari.mp4/clip — a DIFFERENT url shape, which is
+    // precisely what a storage swap must not change. contentKey aligns them.
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', prefix: 'clips/', contentFields: ['clip'],
+      publicBaseUrl: 'https://kodokan-clips.s3.amazonaws.com',
+      contentKey: (id) => `clips/${id}`,
+    });
+
+    expect(await p.getUrl!('osoto-gari.mp4', 'clip')).toBe(
+      'https://kodokan-clips.s3.amazonaws.com/clips/osoto-gari.mp4',
+    );
+
+    // ...and the bytes really are stored under that same key.
+    await p.setContent!('osoto-gari.mp4', 'clip', new Uint8Array([9]));
+    expect([...client.store.keys()]).toContain('clips/osoto-gari.mp4');
+  });
+
+  it('getContent reads back what setContent wrote, under a custom contentKey', async () => {
+    const client = createMockS3Client();
+    const p = createS3BlobProvider<any>({
+      client: client as any, bucket: 'b', contentFields: ['clip'],
+      contentKey: (id) => `clips/${id}`,
+    });
+    await p.setContent!('a.mp4', 'clip', new Uint8Array([7, 8]));
+    const got = (await p.getContent!('a.mp4', 'clip')) as Uint8Array;
+    expect(Array.from(got)).toEqual([7, 8]);
+  });
+});

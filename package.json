@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./presigned": {
+      "types": "./dist/presigned.d.ts",
+      "import": "./dist/presigned.js",
+      "require": "./dist/presigned.cjs"
     }
   },
   "publishConfig": {
@@ -25,14 +30,21 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@zodal/core": "^0.1.0",
-    "@zodal/store": "^0.1.0",
-    "@aws-sdk/client-s3": "^3.0.0"
+    "@zodal/core": "^0.2.0",
+    "@zodal/store": "^0.2.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@zodal/core": "^0.1.0",
-    "@zodal/store": "^0.1.0",
+    "@zodal/core": "^0.2.0",
+    "@zodal/store": "^0.2.0",
     "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

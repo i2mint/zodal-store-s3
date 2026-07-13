@@ -7,8 +7,13 @@
  * Usage with createS3ContentProvider:
  *   const provider = createS3ContentProvider({
  *     ...options,
- *     toContentRef: createPresignedContentRef({ client, bucket, prefix }),
+ *     toContentRef: createPresignedRefGenerator({ client, bucket, prefix }),
  *   });
+ *
+ * Every ContentRef the provider hands out then carries a `url`, and
+ * `provider.getUrl(id, field)` resolves it — so a browser can fetch the bytes
+ * straight from S3 (range requests intact) instead of downloading them through
+ * `getContent()`.
  *
  * Or standalone:
  *   const ref = await getPresignedContentRef(client, bucket, key, field, itemId);
@@ -54,13 +59,14 @@ export async function getPresignedContentRef(
 }
 
 /**
- * Create a toContentRef function that generates presigned URLs.
- * Pass this to createS3ContentProvider's toContentRef option.
+ * Create a `toContentRef` function that generates presigned URLs.
+ * Pass it straight to `createS3ContentProvider`'s `toContentRef` option — that
+ * option accepts an async builder precisely so signing can happen there.
  *
- * Note: This returns an async function. The S3ContentProvider's
- * toContentRef option is synchronous, so you should use this
- * helper directly in custom getList/getOne logic, or pre-generate
- * URLs at the API layer before returning to the client.
+ * Beware the cost model: a ref is signed per content field per item, so a
+ * `getList` over N items signs N URLs. Signing is local (HMAC, no network call
+ * to S3), but it is not free — prefer `listStrategy: 'omit'` and sign lazily via
+ * `getUrl()` when a list is large and most rows are never opened.
  */
 export function createPresignedRefGenerator(options: PresignedOptions) {
   const { client, bucket, expiresIn = 3600 } = options;
