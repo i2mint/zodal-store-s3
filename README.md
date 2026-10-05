@@ -5,14 +5,14 @@ zodal DataProvider adapter for AWS S3. Stores each collection item as a JSON obj
 ## Install
 
 ```bash
-npm install zodal-store-s3 @aws-sdk/client-s3 @zodal/core @zodal/store
+npm install @zodal/store-s3 @aws-sdk/client-s3 @zodal/core @zodal/store zod
 ```
 
 ## Quick Start
 
 ```typescript
 import { S3Client } from '@aws-sdk/client-s3';
-import { createS3Provider } from 'zodal-store-s3';
+import { createS3Provider } from '@zodal/store-s3';
 
 const s3 = new S3Client({ region: 'us-east-1' });
 
@@ -52,6 +52,22 @@ await provider.delete(project.id);
 | `prefix` | `string` | `''` | Key prefix for stored objects |
 | `idField` | `string` | `'id'` | Field name used as unique identifier |
 | `searchFields` | `string[]` | all string fields | Fields included in text search |
+
+## Use from a menu
+
+Each provider is also exported as a descriptor (`@zodal/store` ≥ 0.2.2): name, runtime, options as a Zod schema and capabilities, so an app, a playground or an agent can list it and create it by name.
+
+```typescript
+import { S3Client } from '@aws-sdk/client-s3';
+import { createFromDescriptor, splitOptions } from '@zodal/store/descriptor';
+import { descriptor, contentDescriptor, blobDescriptor } from '@zodal/store-s3'; // 's3', 's3Content', 's3Blob'
+
+const options = { client: new S3Client({ region: 'us-east-1' }), bucket: 'my-bucket', prefix: 'projects/' };
+const provider = await createFromDescriptor(descriptor, options);
+splitOptions(descriptor, options).data; // { bucket: 'my-bucket', prefix: 'projects/' }: the client is left out
+```
+
+`client` (which holds the region and credentials) is a live option: supplied in code, never shown, shared or exported, so no credential appears among the data options. `urlFor`, `contentKey` and `toContentRef` are live too. `contentDescriptor` is marked `composite`; for a cross-backend split, give `blobDescriptor` to `bifurcatedDescriptor` from `@zodal/store/descriptor`.
 
 ## Capabilities
 
