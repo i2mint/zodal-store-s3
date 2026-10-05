@@ -14,10 +14,10 @@ import {
   DeleteObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
-import type { SortingState, FilterExpression } from '@zodal/core';
 import type { DataProvider, GetListParams, GetListResult } from '@zodal/store';
 import type { ProviderCapabilities } from '@zodal/store';
-import { filterToFunction } from '@zodal/store';
+import { applyQuery } from '@zodal/store';
+import { isNotFound } from './errors.js';
 
 export interface S3ProviderOptions {
   /** Pre-configured S3Client instance. */
@@ -97,90 +97,50 @@ export function createS3Provider<T extends Record<string, any>>(
     return items;
   }
 
-  function matchesSearch(item: T, search: string): boolean {
-    if (!search) return true;
-    const lowerSearch = search.toLowerCase();
-    const fields = searchFields ?? Object.keys(item).filter(k => typeof (item as any)[k] === 'string');
-    return fields.some(field => {
-      const val = (item as any)[field];
-      return typeof val === 'string' && val.toLowerCase().includes(lowerSearch);
-    });
+  /** Read an item, rejecting with `Item not found` when its object is missing. */
+  async function readItem(id: string): Promise<T> {
+    try {
+      return await readObject(itemKey(id));
+    } catch (err) {
+      if (isNotFound(err)) throw new Error(`Item not found: ${id}`);
+      throw err;
+    }
   }
 
-  function compareValues(a: any, b: any): number {
-    if (a === b) return 0;
-    if (a == null) return -1;
-    if (b == null) return 1;
-    if (typeof a === 'string' && typeof b === 'string') {
-      return a.localeCompare(b);
+  async function exists(id: string): Promise<boolean> {
+    try {
+      await readObject(itemKey(id));
+      return true;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
     }
-    if (a instanceof Date && b instanceof Date) {
-      return a.getTime() - b.getTime();
-    }
-    return a < b ? -1 : 1;
   }
 
   return {
     async getList(params: GetListParams): Promise<GetListResult<T>> {
-      let items = await listAllItems();
-
-      // Apply structured filters
-      if (params.filter) {
-        const predicate = filterToFunction<T>(params.filter);
-        items = items.filter(predicate);
-      }
-
-      // Apply search
-      if (params.search) {
-        items = items.filter(item => matchesSearch(item, params.search!));
-      }
-
-      const total = items.length;
-
-      // Apply sorting
-      if (params.sort && params.sort.length > 0) {
-        items.sort((a, b) => {
-          for (const sortCol of params.sort!) {
-            const cmp = compareValues((a as any)[sortCol.id], (b as any)[sortCol.id]);
-            if (cmp !== 0) return sortCol.desc ? -cmp : cmp;
-          }
-          return 0;
-        });
-      }
-
-      // Apply pagination
-      if (params.pagination) {
-        const { page, pageSize } = params.pagination;
-        const start = (page - 1) * pageSize;
-        items = items.slice(start, start + pageSize);
-      }
-
-      return { data: items, total };
+      // Items are parsed fresh from S3 on every call, so they are already copies.
+      return applyQuery(await listAllItems(), params, { searchFields });
     },
 
     async getOne(id: string): Promise<T> {
-      try {
-        return await readObject(itemKey(id));
-      } catch (err: any) {
-        if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
-          throw new Error(`Item not found: ${id}`);
-        }
-        throw err;
-      }
+      return readItem(id);
     },
 
     async create(data: Partial<T>): Promise<T> {
-      const newItem = {
-        ...data,
-        [idField]: (data as any)[idField] ?? String(nextId++),
-      } as T;
-      const id = getItemId(newItem);
+      const given = (data as any)[idField];
+      if (given != null && (await exists(String(given)))) {
+        throw new Error(`Item already exists: ${given}`);
+      }
+      let id = given != null ? String(given) : String(nextId++);
+      while (given == null && (await exists(id))) id = String(nextId++);
+      const newItem = { ...data, [idField]: given ?? id } as T;
       await writeObject(id, newItem);
       return { ...newItem };
     },
 
     async update(id: string, data: Partial<T>): Promise<T> {
-      const existing = await readObject(itemKey(id));
+      const existing = await readItem(id);
       const updated = { ...existing, ...data };
       await writeObject(id, updated);
       return { ...updated };
@@ -189,29 +149,28 @@ export function createS3Provider<T extends Record<string, any>>(
     async updateMany(ids: string[], data: Partial<T>): Promise<T[]> {
       const updated: T[] = [];
       for (const id of ids) {
+        // Ids with no item are skipped (the DataProvider contract); other errors propagate.
+        let existing: T;
         try {
-          const existing = await readObject(itemKey(id));
-          const item = { ...existing, ...data };
-          await writeObject(id, item);
-          updated.push({ ...item });
-        } catch {
-          // skip missing items
+          existing = await readObject(itemKey(id));
+        } catch (err) {
+          if (isNotFound(err)) continue;
+          throw err;
         }
+        const item = { ...existing, ...data };
+        await writeObject(id, item);
+        updated.push({ ...item });
       }
       return updated;
     },
 
     async delete(id: string): Promise<void> {
-      // Verify it exists first
-      try {
-        await readObject(itemKey(id));
-      } catch {
-        throw new Error(`Item not found: ${id}`);
-      }
+      if (!(await exists(id))) throw new Error(`Item not found: ${id}`);
       await deleteObject(id);
     },
 
     async deleteMany(ids: string[]): Promise<void> {
+      // S3 deletes are idempotent, so ids with no item are skipped (the DataProvider contract).
       for (const id of ids) {
         await deleteObject(id);
       }

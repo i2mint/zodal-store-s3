@@ -1,6 +1,6 @@
 {
   "name": "@zodal/store-s3",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "zodal DataProvider adapter for AWS S3",
   "type": "module",
   "main": "dist/index.cjs",
@@ -30,8 +30,8 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@zodal/core": "^0.2.0",
-    "@zodal/store": "^0.2.0",
+    "@zodal/core": "^0.2.1",
+    "@zodal/store": "^0.2.1",
     "@aws-sdk/client-s3": "^3.0.0",
     "@aws-sdk/s3-request-presigner": "^3.0.0"
   },
@@ -41,8 +41,8 @@
     }
   },
   "devDependencies": {
-    "@zodal/core": "^0.2.0",
-    "@zodal/store": "^0.2.0",
+    "@zodal/core": "^0.2.1",
+    "@zodal/store": "^0.2.1",
     "@aws-sdk/client-s3": "^3.1085.0",
     "@aws-sdk/s3-request-presigner": "^3.1085.0",
     "tsup": "^8.0.0",

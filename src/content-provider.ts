@@ -17,11 +17,11 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
-  GetObjectCommand as _,
 } from '@aws-sdk/client-s3';
 import type { DataProvider, GetListParams, GetListResult } from '@zodal/store';
 import type { ProviderCapabilities } from '@zodal/store';
-import { filterToFunction } from '@zodal/store';
+import { applyQuery, compareBinary } from '@zodal/store';
+import { isNotFound } from './errors.js';
 
 /** Content reference — matches @zodal/core ContentRef (available in >= 0.2.0). */
 export interface ContentRef {
@@ -99,6 +99,16 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     }));
     const body = await response.Body!.transformToString();
     return JSON.parse(body);
+  }
+
+  async function metaExists(id: string): Promise<boolean> {
+    try {
+      await readMeta(id);
+      return true;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
   }
 
   async function writeMeta(id: string, meta: Record<string, any>): Promise<void> {
@@ -227,51 +237,16 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     return items;
   }
 
-  // --- Search ---
-
-  function matchesSearch(item: Record<string, any>, search: string): boolean {
-    if (!search) return true;
-    const lowerSearch = search.toLowerCase();
-    const fields = searchFields ?? Object.keys(item).filter(k =>
-      typeof item[k] === 'string' && !contentSet.has(k),
-    );
-    return fields.some(f => {
-      const val = item[f];
-      return typeof val === 'string' && val.toLowerCase().includes(lowerSearch);
-    });
-  }
-
   // --- Provider ---
 
   return {
     async getList(params: GetListParams): Promise<GetListResult<T>> {
-      let items = await listAllMeta();
-
-      if (params.filter) {
-        const predicate = filterToFunction<Record<string, any>>(params.filter);
-        items = items.filter(predicate);
-      }
-      if (params.search) {
-        items = items.filter(item => matchesSearch(item, params.search!));
-      }
-
-      const total = items.length;
-
-      if (params.sort?.length) {
-        items.sort((a, b) => {
-          for (const s of params.sort!) {
-            const av = a[s.id], bv = b[s.id];
-            const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-            if (cmp !== 0) return s.desc ? -cmp : cmp;
-          }
-          return 0;
-        });
-      }
-
-      if (params.pagination) {
-        const { page, pageSize } = params.pagination;
-        items = items.slice((page - 1) * pageSize, page * pageSize);
-      }
+      // compareBinary keeps this provider's historical code-unit string order.
+      const { data: items, total } = applyQuery(await listAllMeta(), params, {
+        searchFields,
+        excludeFromSearch: contentSet,
+        compare: compareBinary,
+      });
 
       const data = await Promise.all(
         items.map(item => applyContentStrategy(item, listStrategy)),
@@ -297,7 +272,12 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     },
 
     async create(data: Partial<T>): Promise<T> {
-      const id = String((data as any)[idField] ?? nextId++);
+      const given = (data as any)[idField];
+      if (given != null && (await metaExists(String(given)))) {
+        throw new Error(`Item already exists: ${given}`);
+      }
+      let id = given != null ? String(given) : String(nextId++);
+      while (given == null && (await metaExists(id))) id = String(nextId++);
       const withId = { ...data, [idField]: id };
       const { meta, content } = splitFields(withId as Record<string, any>);
 
@@ -336,16 +316,26 @@ export function createS3ContentProvider<T extends Record<string, any>>(
     },
 
     async updateMany(ids: string[], data: Partial<T>): Promise<T[]> {
-      return Promise.all(ids.map(id => this.update(id, data)));
+      // Ids with no item are skipped (the DataProvider contract).
+      const updated: T[] = [];
+      for (const id of ids) {
+        if (await metaExists(id)) updated.push(await this.update(id, data));
+      }
+      return updated;
     },
 
     async delete(id: string): Promise<void> {
+      // S3 deletes of a missing key succeed silently, so check first.
+      if (!(await metaExists(id))) throw new Error(`Item not found: ${id}`);
       await deleteContent(id);
       await deleteMeta(id);
     },
 
     async deleteMany(ids: string[]): Promise<void> {
-      await Promise.all(ids.map(id => this.delete(id)));
+      // Ids with no item are skipped (the DataProvider contract).
+      for (const id of ids) {
+        if (await metaExists(id)) await this.delete(id);
+      }
     },
 
     getCapabilities(): ProviderCapabilities {
