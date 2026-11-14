@@ -10,6 +10,7 @@
  * direct access (including presigned URLs).
  */
 
+import { keySegment } from './key-segment.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import {
   PutObjectCommand,
@@ -80,11 +81,11 @@ export function createS3ContentProvider<T extends Record<string, any>>(
   // --- Key helpers ---
 
   function metaKey(id: string): string {
-    return `${prefix}${id}.json`;
+    return `${prefix}${keySegment(id)}.json`;
   }
 
   function contentKey(id: string, field: string): string {
-    return `${prefix}${id}/${field}`;
+    return `${prefix}${keySegment(id)}/${field}`;
   }
 
   const toContentRef =

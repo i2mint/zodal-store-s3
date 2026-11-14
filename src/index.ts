@@ -1,4 +1,5 @@
 export { createS3Provider } from './provider.js';
+export { keySegment } from './key-segment.js';
 export type { S3ProviderOptions } from './provider.js';
 
 // Content-aware S3 provider (metadata JSON + raw binary content)

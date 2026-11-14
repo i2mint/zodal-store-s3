@@ -18,6 +18,7 @@ import type { SortingState, FilterExpression } from '@zodal/core';
 import type { DataProvider, GetListParams, GetListResult } from '@zodal/store';
 import type { ProviderCapabilities } from '@zodal/store';
 import { filterToFunction } from '@zodal/store';
+import { keySegment, legacySegment } from './key-segment.js';
 
 export interface S3ProviderOptions {
   /** Pre-configured S3Client instance. */
@@ -41,7 +42,31 @@ export function createS3Provider<T extends Record<string, any>>(
   let nextId = Date.now();
 
   function itemKey(id: string): string {
-    return `${prefix}${id}.json`;
+    return `${prefix}${keySegment(id)}.json`;
+  }
+
+  /** Where an item written before ids were encoded (#7) would be, when that differs. */
+  function legacyKey(id: string): string | undefined {
+    const raw = legacySegment(id);
+    return raw === undefined ? undefined : `${prefix}${raw}.json`;
+  }
+
+  const isMissing = (err: any) => err?.name === 'NoSuchKey' || err?.$metadata?.httpStatusCode === 404;
+
+  /** Read an item at its key, or at its legacy key (objects stored before #7 stay readable). */
+  async function readItem(id: string): Promise<{ item: T; key: string }> {
+    try {
+      return { item: await readObject(itemKey(id)), key: itemKey(id) };
+    } catch (err) {
+      const legacy = legacyKey(id);
+      if (!legacy || !isMissing(err)) throw err;
+      return { item: await readObject(legacy), key: legacy };
+    }
+  }
+
+  /** After writing at the new key, remove a legacy copy (migrates the item on its next write). */
+  async function dropLegacy(foundAt: string, id: string): Promise<void> {
+    if (foundAt !== itemKey(id)) await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: foundAt }));
   }
 
   function getItemId(item: T): string {
@@ -160,11 +185,9 @@ export function createS3Provider<T extends Record<string, any>>(
 
     async getOne(id: string): Promise<T> {
       try {
-        return await readObject(itemKey(id));
+        return (await readItem(id)).item;
       } catch (err: any) {
-        if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
-          throw new Error(`Item not found: ${id}`);
-        }
+        if (isMissing(err)) throw new Error(`Item not found: ${id}`);
         throw err;
       }
     },
@@ -180,9 +203,10 @@ export function createS3Provider<T extends Record<string, any>>(
     },
 
     async update(id: string, data: Partial<T>): Promise<T> {
-      const existing = await readObject(itemKey(id));
+      const { item: existing, key } = await readItem(id);
       const updated = { ...existing, ...data };
       await writeObject(id, updated);
+      await dropLegacy(key, id);
       return { ...updated };
     },
 
@@ -190,9 +214,10 @@ export function createS3Provider<T extends Record<string, any>>(
       const updated: T[] = [];
       for (const id of ids) {
         try {
-          const existing = await readObject(itemKey(id));
+          const { item: existing, key } = await readItem(id);
           const item = { ...existing, ...data };
           await writeObject(id, item);
+          await dropLegacy(key, id);
           updated.push({ ...item });
         } catch {
           // skip missing items
@@ -203,23 +228,28 @@ export function createS3Provider<T extends Record<string, any>>(
 
     async delete(id: string): Promise<void> {
       // Verify it exists first
+      let key: string;
       try {
-        await readObject(itemKey(id));
+        key = (await readItem(id)).key;
       } catch {
         throw new Error(`Item not found: ${id}`);
       }
-      await deleteObject(id);
+      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
     },
 
     async deleteMany(ids: string[]): Promise<void> {
       for (const id of ids) {
         await deleteObject(id);
+        const legacy = legacyKey(id);
+        if (legacy) await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: legacy }));
       }
     },
 
     async upsert(data: T): Promise<T> {
       const id = getItemId(data);
       await writeObject(id, data);
+      const legacy = legacyKey(id);
+      if (legacy) await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: legacy }));
       return { ...data };
     },
 
