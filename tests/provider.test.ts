@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createS3Provider } from '../src/index.js';
+import { createS3Provider, createS3ContentProvider } from '../src/index.js';
 
 // ---------------------------------------------------------------------------
 // Minimal S3Client mock — stores objects in a Map keyed by S3 object key.
@@ -277,5 +277,46 @@ describe('createS3Provider', () => {
     const created = await provider.create({ name: 'Test', priority: 1 });
     const expectedKey = `items/${created.id}.json`;
     expect(mockClient.store.has(expectedKey)).toBe(true);
+  });
+});
+
+
+describe('unsafe ids (#7)', () => {
+  const HOSTILE = ['a/b', '../escape', '.', '..', 'a\\b', 'nul\u0000x', '~tilde'];
+
+  it('never lets an id add a key segment, and round-trips it', async () => {
+    const client = createMockS3Client();
+    const p = createS3Provider<TestItem>({ client, bucket: 'b', prefix: 'items/' });
+    for (const id of HOSTILE) await p.create({ id, name: id, priority: 1 });
+    for (const key of client.store.keys()) {
+      expect(key.slice('items/'.length)).not.toMatch(/[/\\\u0000]/);
+      expect(key.slice('items/'.length, -'.json'.length)).toMatch(/^~[A-Za-z0-9_-]+$/);
+    }
+    for (const id of HOSTILE) expect((await p.getOne(id)).name).toBe(id);
+    const listed = (await p.getList({})).data.map((x) => x.id).sort();
+    expect(listed).toEqual([...HOSTILE].sort());
+    await p.delete('a/b');
+    expect(client.store.size).toBe(HOSTILE.length - 1);
+  });
+
+  it('keeps the keys of ordinary ids (existing objects stay reachable)', async () => {
+    const client = createMockS3Client();
+    const p = createS3Provider<TestItem>({ client, bucket: 'b' });
+    await p.create({ id: 'my item é', name: 'x', priority: 1 });
+    expect([...client.store.keys()]).toEqual(['my item é.json']);
+  });
+});
+
+describe('unsafe ids in the content provider (#7)', () => {
+  it('lists an item whose id has a slash, and keeps its content apart from other items', async () => {
+    const client = createMockS3Client();
+    const p = createS3ContentProvider<any>({ client, bucket: 'b', contentFields: ['body'] });
+    await p.create({ id: 'a', name: 'A', body: 'for a' });
+    await p.create({ id: 'a/body', name: 'nested', body: 'for a/body' });
+    const ids = (await p.getList({})).data.map((x: any) => x.id).sort();
+    expect(ids).toEqual(['a', 'a/body']);
+    // Item `a`'s content key and item `a/body`'s metadata key no longer collide.
+    expect(client.store.get('a/body')).toBe('for a');
+    expect([...client.store.keys()].filter((k) => k.startsWith('~')).length).toBe(2);
   });
 });

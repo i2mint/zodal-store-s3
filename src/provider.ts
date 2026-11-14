@@ -18,6 +18,7 @@ import type { SortingState, FilterExpression } from '@zodal/core';
 import type { DataProvider, GetListParams, GetListResult } from '@zodal/store';
 import type { ProviderCapabilities } from '@zodal/store';
 import { filterToFunction } from '@zodal/store';
+import { keySegment } from './key-segment.js';
 
 export interface S3ProviderOptions {
   /** Pre-configured S3Client instance. */
@@ -41,7 +42,7 @@ export function createS3Provider<T extends Record<string, any>>(
   let nextId = Date.now();
 
   function itemKey(id: string): string {
-    return `${prefix}${id}.json`;
+    return `${prefix}${keySegment(id)}.json`;
   }
 
   function getItemId(item: T): string {

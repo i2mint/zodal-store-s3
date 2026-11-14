@@ -26,6 +26,7 @@
  * ```
  */
 
+import { keySegment } from './key-segment.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import {
   PutObjectCommand,
@@ -90,7 +91,7 @@ export function createS3BlobProvider<T extends Record<string, any>>(
   const contentSet = new Set(contentFields);
 
   const blobKey =
-    options.contentKey ?? ((id: string, field: string) => `${prefix}${id}/${field}`);
+    options.contentKey ?? ((id: string, field: string) => `${prefix}${keySegment(id)}/${field}`);
 
   // The URL must address the SAME object the key does, or getUrl() and getContent()
   // would disagree about where the bytes are.
