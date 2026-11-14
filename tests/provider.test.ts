@@ -320,3 +320,21 @@ describe('unsafe ids in the content provider (#7)', () => {
     expect([...client.store.keys()].filter((k) => k.startsWith('~')).length).toBe(2);
   });
 });
+
+describe('review fixes for #7', () => {
+  it('reads, updates (migrating) and deletes an item stored at its legacy key', async () => {
+    const client = createMockS3Client();
+    client.store.set('a/b.json', JSON.stringify({ id: 'a/b', name: 'old', priority: 1 }));
+    const p = createS3Provider<TestItem>({ client, bucket: 'b' });
+    expect((await p.getOne('a/b')).name).toBe('old');
+    await p.update('a/b', { name: 'new' });
+    expect([...client.store.keys()]).toEqual(['~YS9i.json']);
+    await p.delete('a/b');
+    expect(client.store.size).toBe(0);
+  });
+  it('refuses an id too long for an S3 key, and encodes control characters', async () => {
+    const { keySegment } = await import('../src/index.js');
+    expect(() => keySegment('/' + 'x'.repeat(800))).toThrow(/too long/);
+    expect(keySegment('a\u0001b')).toMatch(/^~/);
+  });
+});

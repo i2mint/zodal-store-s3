@@ -75,7 +75,7 @@ export interface S3BlobProviderOptions {
    *
    * This matters for migrations: `@zodal/store-http` keys a lone content field as
    * `{base}/{id}`, so a bucket that mirrors an existing HTTP layout wants
-   * `contentKey: (id) => `${prefix}${id}`` here. Getting it wrong doesn't break app code
+   * `contentKey: (id) => `${prefix}${keySegment(id)}`` here (import `keySegment` from this package, so unsafe ids stay one segment). Getting it wrong doesn't break app code
    * — everything still goes through `getUrl()` — but it silently changes every URL's
    * shape, which is exactly the kind of thing a storage swap is supposed not to do.
    */
@@ -98,7 +98,9 @@ export function createS3BlobProvider<T extends Record<string, any>>(
   async function resolveUrl(id: string, field: string): Promise<string | null> {
     if (urlFor) return await urlFor(id, field);
     if (publicBaseUrl) {
-      return `${publicBaseUrl.replace(/\/+$/, '')}/${blobKey(id, field)}`;
+      // Percent-encode each key segment: an id like `%2e%2e`, `a?b` or `a#b` must not change the path.
+      const path = blobKey(id, field).split('/').map(encodeURIComponent).join('/');
+      return `${publicBaseUrl.replace(/\/+$/, '')}/${path}`;
     }
     return null;
   }

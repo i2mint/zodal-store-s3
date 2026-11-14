@@ -245,3 +245,12 @@ describe('getUrl', () => {
     expect(Array.from(got)).toEqual([7, 8]);
   });
 });
+
+describe('publicBaseUrl encodes key segments (#7 review)', () => {
+  it('a %2e%2e or ? in an id cannot change the URL path', async () => {
+    const p = createS3BlobProvider<any>({ client: createMockS3Client(), bucket: 'b', contentFields: ['f'], publicBaseUrl: 'https://cdn.x/' });
+    expect(await p.getUrl!('%2e%2e', 'f')).toBe('https://cdn.x/%252e%252e/f');
+    expect(await p.getUrl!('a?b', 'f')).toBe('https://cdn.x/a%3Fb/f');
+    expect(await p.getUrl!('a/b', 'f')).toBe('https://cdn.x/~YS9i/f');
+  });
+});
